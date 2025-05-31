@@ -4,6 +4,8 @@ import {
   type InsertUser, type InsertCreator, type InsertTimeSlot, type InsertBooking,
   type CreatorWithUser, type BookingWithDetails
 } from "@shared/schema";
+import { db } from "./db";
+import { eq, and, gte, lte } from "drizzle-orm";
 
 export interface IStorage {
   // Users
@@ -33,26 +35,8 @@ export interface IStorage {
   updateBookingStatus(id: number, status: string, paymentIntentId?: string): Promise<Booking>;
 }
 
-export class MemStorage implements IStorage {
-  private users: Map<number, User>;
-  private creators: Map<number, Creator>;
-  private timeSlots: Map<number, TimeSlot>;
-  private bookings: Map<number, Booking>;
-  private currentUserId: number;
-  private currentCreatorId: number;
-  private currentTimeSlotId: number;
-  private currentBookingId: number;
-
+export class DatabaseStorage implements IStorage {
   constructor() {
-    this.users = new Map();
-    this.creators = new Map();
-    this.timeSlots = new Map();
-    this.bookings = new Map();
-    this.currentUserId = 1;
-    this.currentCreatorId = 1;
-    this.currentTimeSlotId = 1;
-    this.currentBookingId = 1;
-
     // Seed with some initial data
     this.seedInitialData();
   }
@@ -144,161 +128,184 @@ export class MemStorage implements IStorage {
   }
 
   async getUser(id: number): Promise<User | undefined> {
-    return this.users.get(id);
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user || undefined;
   }
 
   async getUserByFid(fid: number): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(user => user.fid === fid);
+    const [user] = await db.select().from(users).where(eq(users.fid, fid));
+    return user || undefined;
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
-    const id = this.currentUserId++;
-    const user: User = { 
-      ...insertUser, 
-      id,
-      fid: insertUser.fid || null,
-      profileImage: insertUser.profileImage || null,
-      displayName: insertUser.displayName || null,
-      bio: insertUser.bio || null,
-      walletAddress: insertUser.walletAddress || null
-    };
-    this.users.set(id, user);
+    const [user] = await db
+      .insert(users)
+      .values(insertUser)
+      .returning();
     return user;
   }
 
   async updateUserWallet(id: number, walletAddress: string): Promise<User> {
-    const user = this.users.get(id);
+    const [user] = await db
+      .update(users)
+      .set({ walletAddress })
+      .where(eq(users.id, id))
+      .returning();
     if (!user) throw new Error("User not found");
-    const updated: User = { ...user, walletAddress };
-    this.users.set(id, updated);
-    return updated;
+    return user;
   }
 
   async getCreator(id: number): Promise<Creator | undefined> {
-    return this.creators.get(id);
+    const [creator] = await db.select().from(creators).where(eq(creators.id, id));
+    return creator || undefined;
   }
 
   async getCreatorByUserId(userId: number): Promise<Creator | undefined> {
-    return Array.from(this.creators.values()).find(creator => creator.userId === userId);
+    const [creator] = await db.select().from(creators).where(eq(creators.userId, userId));
+    return creator || undefined;
   }
 
   async getCreators(category?: string): Promise<CreatorWithUser[]> {
-    const allCreators = Array.from(this.creators.values());
-    const filtered = category 
-      ? allCreators.filter(creator => creator.category === category && creator.isActive)
-      : allCreators.filter(creator => creator.isActive);
+    let whereConditions = [eq(creators.isActive, true)];
+    
+    if (category) {
+      whereConditions.push(eq(creators.category, category));
+    }
 
-    return filtered.map(creator => {
-      const user = this.users.get(creator.userId)!;
-      return { ...creator, user };
-    });
+    const results = await db
+      .select()
+      .from(creators)
+      .innerJoin(users, eq(creators.userId, users.id))
+      .where(and(...whereConditions));
+    
+    return results.map(({ creators: creator, users: user }) => ({
+      ...creator,
+      user
+    }));
   }
 
   async createCreator(insertCreator: InsertCreator): Promise<Creator> {
-    const id = this.currentCreatorId++;
-    const creator: Creator = { ...insertCreator, id };
-    this.creators.set(id, creator);
+    const [creator] = await db
+      .insert(creators)
+      .values(insertCreator)
+      .returning();
     return creator;
   }
 
   async updateCreator(id: number, updates: Partial<Creator>): Promise<Creator> {
-    const creator = this.creators.get(id);
+    const [creator] = await db
+      .update(creators)
+      .set(updates)
+      .where(eq(creators.id, id))
+      .returning();
     if (!creator) throw new Error("Creator not found");
-    const updated: Creator = { ...creator, ...updates };
-    this.creators.set(id, updated);
-    return updated;
+    return creator;
   }
 
   async getTimeSlot(id: number): Promise<TimeSlot | undefined> {
-    return this.timeSlots.get(id);
+    const [timeSlot] = await db.select().from(timeSlots).where(eq(timeSlots.id, id));
+    return timeSlot || undefined;
   }
 
   async getAvailableTimeSlots(creatorId: number, startDate?: Date, endDate?: Date): Promise<TimeSlot[]> {
-    const slots = Array.from(this.timeSlots.values()).filter(slot => 
-      slot.creatorId === creatorId && slot.isAvailable
-    );
+    let whereConditions = [
+      eq(timeSlots.creatorId, creatorId),
+      eq(timeSlots.isAvailable, true)
+    ];
 
     if (startDate && endDate) {
-      return slots.filter(slot => 
-        slot.startTime >= startDate && slot.endTime <= endDate
-      );
+      whereConditions.push(gte(timeSlots.startTime, startDate));
+      whereConditions.push(lte(timeSlots.endTime, endDate));
     }
 
-    return slots;
+    return await db
+      .select()
+      .from(timeSlots)
+      .where(and(...whereConditions));
   }
 
   async createTimeSlot(insertTimeSlot: InsertTimeSlot): Promise<TimeSlot> {
-    const id = this.currentTimeSlotId++;
-    const timeSlot: TimeSlot = { ...insertTimeSlot, id };
-    this.timeSlots.set(id, timeSlot);
+    const [timeSlot] = await db
+      .insert(timeSlots)
+      .values(insertTimeSlot)
+      .returning();
     return timeSlot;
   }
 
   async updateTimeSlotAvailability(id: number, isAvailable: boolean): Promise<TimeSlot> {
-    const timeSlot = this.timeSlots.get(id);
+    const [timeSlot] = await db
+      .update(timeSlots)
+      .set({ isAvailable })
+      .where(eq(timeSlots.id, id))
+      .returning();
     if (!timeSlot) throw new Error("Time slot not found");
-    const updated: TimeSlot = { ...timeSlot, isAvailable };
-    this.timeSlots.set(id, updated);
-    return updated;
+    return timeSlot;
   }
 
   async getBooking(id: number): Promise<Booking | undefined> {
-    return this.bookings.get(id);
+    const [booking] = await db.select().from(bookings).where(eq(bookings.id, id));
+    return booking || undefined;
   }
 
   async getUserBookings(userId: number): Promise<BookingWithDetails[]> {
-    const userBookings = Array.from(this.bookings.values()).filter(booking => booking.userId === userId);
-    
-    return userBookings.map(booking => {
-      const creator = this.creators.get(booking.creatorId)!;
-      const user = this.users.get(creator.userId)!;
-      const timeSlot = this.timeSlots.get(booking.timeSlotId)!;
-      
-      return {
-        ...booking,
-        creator: { ...creator, user },
-        timeSlot
-      };
-    });
+    const results = await db
+      .select()
+      .from(bookings)
+      .innerJoin(creators, eq(bookings.creatorId, creators.id))
+      .innerJoin(users, eq(creators.userId, users.id))
+      .innerJoin(timeSlots, eq(bookings.timeSlotId, timeSlots.id))
+      .where(eq(bookings.userId, userId));
+
+    return results.map(({ bookings: booking, creators: creator, users: user, time_slots: timeSlot }) => ({
+      ...booking,
+      creator: { ...creator, user },
+      timeSlot
+    }));
   }
 
   async getCreatorBookings(creatorId: number): Promise<BookingWithDetails[]> {
-    const creatorBookings = Array.from(this.bookings.values()).filter(booking => booking.creatorId === creatorId);
-    
-    return creatorBookings.map(booking => {
-      const creator = this.creators.get(booking.creatorId)!;
-      const user = this.users.get(creator.userId)!;
-      const timeSlot = this.timeSlots.get(booking.timeSlotId)!;
-      
-      return {
-        ...booking,
-        creator: { ...creator, user },
-        timeSlot
-      };
-    });
+    const results = await db
+      .select()
+      .from(bookings)
+      .innerJoin(creators, eq(bookings.creatorId, creators.id))
+      .innerJoin(users, eq(creators.userId, users.id))
+      .innerJoin(timeSlots, eq(bookings.timeSlotId, timeSlots.id))
+      .where(eq(bookings.creatorId, creatorId));
+
+    return results.map(({ bookings: booking, creators: creator, users: user, time_slots: timeSlot }) => ({
+      ...booking,
+      creator: { ...creator, user },
+      timeSlot
+    }));
   }
 
   async createBooking(insertBooking: InsertBooking): Promise<Booking> {
-    const id = this.currentBookingId++;
-    const booking: Booking = { 
-      ...insertBooking, 
-      id,
-      createdAt: new Date()
-    };
-    this.bookings.set(id, booking);
+    const [booking] = await db
+      .insert(bookings)
+      .values({
+        ...insertBooking,
+        status: insertBooking.status || "pending",
+        message: insertBooking.message || null,
+        paymentIntentId: insertBooking.paymentIntentId || null
+      })
+      .returning();
     return booking;
   }
 
   async updateBookingStatus(id: number, status: string, paymentIntentId?: string): Promise<Booking> {
-    const booking = this.bookings.get(id);
+    const updateData: any = { status };
+    if (paymentIntentId) {
+      updateData.paymentIntentId = paymentIntentId;
+    }
+
+    const [booking] = await db
+      .update(bookings)
+      .set(updateData)
+      .where(eq(bookings.id, id))
+      .returning();
+    
     if (!booking) throw new Error("Booking not found");
-    const updated: Booking = { 
-      ...booking, 
-      status,
-      ...(paymentIntentId && { paymentIntentId })
-    };
-    this.bookings.set(id, updated);
-    return updated;
+    return booking;
   }
 }
 
