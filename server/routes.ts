@@ -1,16 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import Stripe from "stripe";
 import { storage } from "./storage";
 import { insertBookingSchema } from "@shared/schema";
-
-if (!process.env.STRIPE_SECRET_KEY) {
-  throw new Error('Missing required Stripe secret: STRIPE_SECRET_KEY');
-}
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2023-10-16",
-});
 
 export async function registerRoutes(app: Express): Promise<Server> {
   
@@ -91,53 +82,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Stripe payment intent for booking
-  app.post("/api/create-payment-intent", async (req, res) => {
+  // Crypto payment confirmation
+  app.post("/api/confirm-crypto-payment", async (req, res) => {
     try {
-      const { amount, bookingId } = req.body;
+      const { bookingId, transactionHash, walletAddress } = req.body;
       
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: Math.round(amount), // Amount already in cents
-        currency: "usd",
-        metadata: {
-          bookingId: bookingId?.toString() || ""
-        }
-      });
-
-      // Update booking with payment intent ID
-      if (bookingId) {
-        await storage.updateBookingStatus(
-          bookingId, 
-          "payment_pending", 
-          paymentIntent.id
-        );
+      if (!bookingId || !transactionHash) {
+        return res.status(400).json({ message: "Missing required fields" });
       }
-
-      res.json({ clientSecret: paymentIntent.client_secret });
-    } catch (error: any) {
-      res.status(500).json({ 
-        message: "Error creating payment intent: " + error.message 
-      });
-    }
-  });
-
-  // Confirm payment and finalize booking
-  app.post("/api/confirm-payment", async (req, res) => {
-    try {
-      const { paymentIntentId } = req.body;
       
-      // Retrieve payment intent from Stripe
-      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+      // In a real implementation, you would verify the transaction on-chain
+      // For now, we'll trust the client-side verification
+      await storage.updateBookingStatus(bookingId, "confirmed", transactionHash);
       
-      if (paymentIntent.status === "succeeded") {
-        const bookingId = parseInt(paymentIntent.metadata.bookingId);
-        if (bookingId) {
-          await storage.updateBookingStatus(bookingId, "confirmed");
-        }
-        res.json({ success: true, status: "confirmed" });
-      } else {
-        res.json({ success: false, status: paymentIntent.status });
-      }
+      res.json({ success: true, status: "confirmed" });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }

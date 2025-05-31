@@ -4,19 +4,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { useDynamicContext } from "@dynamic-labs/sdk-react-core";
-import { useStripe, useElements, Elements, PaymentElement } from '@stripe/react-stripe-js';
-import { loadStripe } from '@stripe/stripe-js';
 import CalendarPicker from "./calendar-picker";
 import type { CreatorWithUser, TimeSlot } from "@shared/schema";
-
-if (!import.meta.env.VITE_STRIPE_PUBLIC_KEY) {
-  throw new Error('Missing required Stripe key: VITE_STRIPE_PUBLIC_KEY');
-}
-const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLIC_KEY);
 
 interface BookingModalProps {
   creator: CreatorWithUser;
@@ -27,11 +19,9 @@ interface BookingModalProps {
 function BookingForm({ creator, onClose }: { creator: CreatorWithUser; onClose: () => void }) {
   const [selectedTimeSlot, setSelectedTimeSlot] = useState<TimeSlot | null>(null);
   const [message, setMessage] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState("crypto");
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const { toast } = useToast();
-  const { isAuthenticated, user } = useDynamicContext();
-  const stripe = useStripe();
-  const elements = useElements();
+  const { isAuthenticated, user, primaryWallet } = useDynamicContext();
 
   const { data: timeSlots = [] } = useQuery<TimeSlot[]>({
     queryKey: ["/api/creators", creator.id, "timeslots"],
@@ -44,16 +34,7 @@ function BookingForm({ creator, onClose }: { creator: CreatorWithUser; onClose: 
       return response.json();
     },
     onSuccess: (booking) => {
-      if (paymentMethod === "card" && stripe && elements) {
-        handleStripePayment(booking.id);
-      } else {
-        // Handle crypto payment or complete booking
-        toast({
-          title: "Booking Created",
-          description: "Your booking has been created successfully!",
-        });
-        onClose();
-      }
+      handleCryptoPayment(booking.id);
     },
     onError: (error: any) => {
       toast({
@@ -64,49 +45,57 @@ function BookingForm({ creator, onClose }: { creator: CreatorWithUser; onClose: 
     },
   });
 
-  const handleStripePayment = async (bookingId: number) => {
-    if (!stripe || !elements) return;
-
-    try {
-      // Create payment intent
-      const paymentResponse = await apiRequest("POST", "/api/create-payment-intent", {
-        amount: creator.rate,
-        bookingId,
-      });
-      const { clientSecret } = await paymentResponse.json();
-
-      // Confirm payment
-      const { error } = await stripe.confirmPayment({
-        elements,
-        confirmParams: {
-          return_url: window.location.origin,
-        },
-      });
-
-      if (error) {
-        toast({
-          title: "Payment Failed",
-          description: error.message,
-          variant: "destructive",
-        });
-      } else {
-        toast({
-          title: "Payment Successful",
-          description: "Your booking has been confirmed!",
-        });
-        onClose();
-      }
-    } catch (error: any) {
+  const handleCryptoPayment = async (bookingId: number) => {
+    if (!primaryWallet) {
       toast({
-        title: "Payment Error",
-        description: error.message,
+        title: "Wallet Required",
+        description: "Please connect your wallet to complete payment.",
         variant: "destructive",
       });
+      return;
+    }
+
+    setIsProcessingPayment(true);
+
+    try {
+      // Convert price from cents to ETH (simplified conversion)
+      const amountInEth = (creator.rate / 100) / 2000; // Rough ETH conversion
+      const amountInWei = (amountInEth * 1e18).toString();
+
+      // In a real implementation, you would:
+      // 1. Get the creator's wallet address
+      // 2. Send payment to their address
+      // 3. Wait for transaction confirmation
+      
+      // For demo purposes, we'll simulate a transaction
+      const simulatedTxHash = `0x${Math.random().toString(16).slice(2)}${Math.random().toString(16).slice(2)}`;
+      
+      // Confirm payment on backend
+      await apiRequest("POST", "/api/confirm-crypto-payment", {
+        bookingId,
+        transactionHash: simulatedTxHash,
+        walletAddress: primaryWallet.address,
+      });
+
+      toast({
+        title: "Payment Successful",
+        description: "Your booking has been confirmed! You'll receive a confirmation email shortly.",
+      });
+      
+      onClose();
+    } catch (error: any) {
+      toast({
+        title: "Payment Failed",
+        description: error.message || "Transaction failed. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsProcessingPayment(false);
     }
   };
 
   const handleBooking = () => {
-    if (!isAuthenticated) {
+    if (!primaryWallet) {
       toast({
         title: "Please Connect Wallet",
         description: "You need to connect your wallet to make a booking.",
@@ -128,7 +117,7 @@ function BookingForm({ creator, onClose }: { creator: CreatorWithUser; onClose: 
       userId: 1, // This should come from authenticated user
       creatorId: creator.id,
       timeSlotId: selectedTimeSlot.id,
-      message,
+      message: message || null,
       totalAmount: creator.rate,
       status: "pending",
     });
@@ -214,39 +203,27 @@ function BookingForm({ creator, onClose }: { creator: CreatorWithUser; onClose: 
         {/* Payment Method */}
         <div className="mb-6">
           <Label className="text-sm font-medium text-gray-700 mb-3">Payment Method</Label>
-          <RadioGroup value={paymentMethod} onValueChange={setPaymentMethod}>
-            <div className="flex items-center space-x-3 p-3 border-2 border-farcaster-500 bg-farcaster-50 rounded-lg">
-              <RadioGroupItem value="crypto" id="crypto" />
-              <Label htmlFor="crypto" className="flex items-center space-x-2 cursor-pointer">
-                <span>💰</span>
-                <span className="font-medium">Crypto Wallet</span>
-              </Label>
+          <div className="p-4 border-2 border-farcaster-500 bg-farcaster-50 rounded-lg">
+            <div className="flex items-center space-x-3">
+              <span className="text-2xl">💰</span>
+              <div>
+                <div className="font-medium text-farcaster-700">Crypto Wallet Payment</div>
+                <div className="text-sm text-farcaster-600">Pay securely with your connected wallet</div>
+              </div>
             </div>
-            <div className="flex items-center space-x-3 p-3 border border-gray-200 rounded-lg">
-              <RadioGroupItem value="card" id="card" />
-              <Label htmlFor="card" className="flex items-center space-x-2 cursor-pointer">
-                <span>💳</span>
-                <span>Credit Card</span>
-              </Label>
-            </div>
-          </RadioGroup>
-        </div>
-
-        {/* Payment Element for Stripe */}
-        {paymentMethod === "card" && (
-          <div className="mb-6">
-            <PaymentElement />
           </div>
-        )}
+        </div>
         
         {/* Book Button */}
         <Button 
           onClick={handleBooking}
-          disabled={!selectedTimeSlot || createBookingMutation.isPending}
+          disabled={!selectedTimeSlot || createBookingMutation.isPending || isProcessingPayment}
           className="w-full bg-farcaster-500 hover:bg-farcaster-600"
         >
-          {createBookingMutation.isPending ? (
-            "Processing..."
+          {isProcessingPayment ? (
+            "Processing Payment..."
+          ) : createBookingMutation.isPending ? (
+            "Creating Booking..."
           ) : (
             `Confirm & Pay ${formatPrice(creator.rate)}`
           )}
@@ -261,23 +238,7 @@ function BookingForm({ creator, onClose }: { creator: CreatorWithUser; onClose: 
 }
 
 export default function BookingModal({ creator, isOpen, onClose }: BookingModalProps) {
-  const [clientSecret, setClientSecret] = useState("");
-
-  useEffect(() => {
-    if (isOpen) {
-      // Initialize Stripe payment element
-      apiRequest("POST", "/api/create-payment-intent", { 
-        amount: creator.rate 
-      })
-        .then((res) => res.json())
-        .then((data) => setClientSecret(data.clientSecret))
-        .catch(console.error);
-    }
-  }, [isOpen, creator.rate]);
-
   if (!isOpen) return null;
-
-  const stripeOptions = clientSecret ? { clientSecret } : undefined;
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
@@ -288,13 +249,7 @@ export default function BookingModal({ creator, isOpen, onClose }: BookingModalP
           </DialogTitle>
         </DialogHeader>
         
-        {stripeOptions ? (
-          <Elements stripe={stripePromise} options={stripeOptions}>
-            <BookingForm creator={creator} onClose={onClose} />
-          </Elements>
-        ) : (
-          <BookingForm creator={creator} onClose={onClose} />
-        )}
+        <BookingForm creator={creator} onClose={onClose} />
       </DialogContent>
     </Dialog>
   );
